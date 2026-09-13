@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
 from datetime import datetime
+from enum import Enum
 
 
 class CallState(str, Enum):
     IDLE = "IDLE"
     OUTGOING = "OUTGOING"
     IN_CALL = "IN_CALL"
+    ENDING = "ENDING"
     BUSY = "BUSY"
     ENDED = "ENDED"
     FAILED = "FAILED"
@@ -30,11 +31,9 @@ class Call:
     phone: str
     state: CallState
     result: CallResult
-
     outgoing_at: datetime | None = None
     started_at: datetime | None = None
     ended_at: datetime | None = None
-
     manual_result: CallResult | None = None
 
     @property
