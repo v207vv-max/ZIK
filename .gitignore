@@ -1,0 +1,151 @@
+# ============================================================
+# ZIK - Python / MicroSIP automation project
+# ============================================================
+
+# ------------------------------------------------------------
+# Python
+# ------------------------------------------------------------
+
+__pycache__/
+*.py[cod]
+*$py.class
+
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# Type checkers / linters
+.mypy_cache/
+.pyre/
+.ruff_cache/
+
+# ------------------------------------------------------------
+# IDE
+# ------------------------------------------------------------
+
+.idea/
+.vscode/
+*.iml
+
+# PyCharm
+*.iws
+*.ipr
+
+# ------------------------------------------------------------
+# Environment / secrets
+# ------------------------------------------------------------
+
+.env
+.env.*
+!.env.example
+
+# ------------------------------------------------------------
+# ZIK runtime data
+# ------------------------------------------------------------
+
+# SQLite database
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+
+# SQLite temporary files
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+
+# ------------------------------------------------------------
+# Logs
+# ------------------------------------------------------------
+
+logs/*.log
+logs/*.txt
+logs/*.jsonl
+
+# Keep the directory in Git
+!logs/.gitkeep
+
+# ------------------------------------------------------------
+# Backups / local configuration
+# ------------------------------------------------------------
+
+*.backup
+*.bak
+
+# MicroSIP local configuration backups
+microsip.ini.backup
+*.ini.backup
+
+# Local config files
+config/local.*
+config/*.local.*
+config/secrets.*
+
+# ------------------------------------------------------------
+# OS
+# ------------------------------------------------------------
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# macOS
+.DS_Store
+
+# Linux
+*~
+
+# ------------------------------------------------------------
+# Temporary files
+# ------------------------------------------------------------
+
+*.tmp
+*.temp
+*.swp
+*.swo
+
+# ------------------------------------------------------------
+# Build / executable artifacts
+# ------------------------------------------------------------
+
+*.exe
+*.msi
+
+# ------------------------------------------------------------
+# Recordings
+# ------------------------------------------------------------
+
+# Don't upload call recordings
+Recordings/
+recordings/
+*.mp3
+*.wav
+*.ogg
+*.m4a
+
+# ------------------------------------------------------------
+# Local test data
+# ------------------------------------------------------------
+
+tests/output/
+tests/tmp/
+tmp/
+temp/
