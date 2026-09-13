@@ -4,7 +4,6 @@ import logging
 import threading
 from pathlib import Path
 from typing import Callable
-from app.excel.wps_sync import WPSSync
 from app.calls.models import CallResult, CallState
 from app.calls.state_machine import CallStateMachine
 from app.dialer.dialer import Dialer
@@ -37,8 +36,6 @@ class ZIKController:
         microsip: MicroSIPController,
         state_machine: CallStateMachine,
     ) -> None:
-        self.wps = WPSSync()
-        self.writer = writer
         self.microsip = microsip
         self.state_machine = state_machine
 
@@ -119,7 +116,7 @@ class ZIKController:
                     if item is not None
                     else self._current_attempt
                 ),
-                "max_attempts": 3,
+                "max_attempts": 2,
                 "result": (
                     self._last_result.value
                     if self._last_result is not None
@@ -183,7 +180,7 @@ class ZIKController:
             self.writer = writer
             self.result_filter = result_filter
 
-            # Подключаем Writer к уже существующему Dialer.
+            # WPS is not used. Results are written directly by ExcelWriter.
             self.dialer.excel_writer = writer
 
         self._emit_log(
@@ -401,12 +398,6 @@ class ZIKController:
                 self._current_row = item.excel_row
                 self._current_attempt = item.attempts
 
-            excel_path = self.excel_path
-            excel_row = (
-                item.excel_row
-                if item is not None
-                else self._current_row
-            )
 
         self._emit_log(
             f"Результат звонка: "
@@ -414,53 +405,27 @@ class ZIKController:
         )
 
         # =========================================================
-        # WPS
+        # DIALER
         # =========================================================
 
-        if (
-            excel_path is not None
-            and excel_row is not None
-        ):
-            success = self.wps.write_result(
-                excel_path,
-                excel_row,
-                result.value,
-            )
+        self.dialer.handle_result(
+            phone,
+            result,
+        )
 
-            if success:
-                self._emit_log(
-                    f"WPS: результат записан | "
-                    f"row={excel_row} | "
-                    f"result={result.value}"
-                )
+        # =========================================================
+        # UI
+        # =========================================================
 
-            else:
-                self._emit_log(
-                    f"WPS: НЕ удалось записать результат | "
-                    f"row={excel_row}"
-                )
+        self._emit_status()
 
-    # =========================================================
-    # DIALER
-    # =========================================================
+        # Give Dialer a short moment to finish retry/current-item
+        # changes before the next UI status refresh.
+        threading.Timer(
+            0.10,
+            self._emit_status,
+        ).start()
 
-    self.dialer.handle_result(
-        phone,
-        result,
-    )
-
-    # =========================================================
-    # UI
-    # =========================================================
-
-    self._emit_status()
-
-    # Даём Dialer завершить retry/current
-    # и получить следующий QueueItem.
-    threading.Timer(
-        0.05,
-        self._emit_status,
-    ).start()
     # ============================================================
     # STATE
     # ============================================================

@@ -14,6 +14,7 @@ class ExcelRow:
     name: object
     payment_type: object
     phone: object
+    status: object = ""
     result: object = ""
 
 
@@ -26,71 +27,27 @@ class ExcelReader:
         "Номер": "phone",
     }
 
+    STATUS_COLUMN_INDEX = 6
     RESULT_COLUMN = "Результат"
 
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
 
-    # =========================================================
-    # HEADER
-    # =========================================================
-
     @staticmethod
     def _normalize_header(value: object) -> str:
         if value is None:
             return ""
-
         return str(value).strip()
-
-    # =========================================================
-    # RESULT COLUMN
-    # =========================================================
 
     def _find_result_column(
         self,
         worksheet,
         headers: dict[str, int],
     ) -> int | None:
-        """
-        Находит колонку Результат.
-
-        Основной вариант:
-            заголовок 'Результат'
-
-        Fallback:
-            если заголовка нет, но после обязательных
-            колонок существует дополнительная колонка
-            с данными, используем её как результат.
-
-        Это нужно для старого Sverka.xlsx, где данные
-        результата находятся в F, но заголовок F может
-        отсутствовать/быть повреждён.
-        """
-
-        # -----------------------------------------------------
-        # 1. Нормальный вариант.
-        # -----------------------------------------------------
-
-        result_column = headers.get(
-            self.RESULT_COLUMN
-        )
+        result_column = headers.get(self.RESULT_COLUMN)
 
         if result_column is not None:
             return result_column
-
-        # -----------------------------------------------------
-        # 2. Fallback.
-        #
-        # Обязательные колонки:
-        #
-        # A = Дата
-        # B = Продукт
-        # C = Имя
-        # D = Тип Оплаты
-        # E = Номер
-        #
-        # Следующая колонка = F.
-        # -----------------------------------------------------
 
         required_columns = [
             headers[column]
@@ -100,19 +57,12 @@ class ExcelReader:
         if not required_columns:
             return None
 
-        next_column = max(
-            required_columns
-        ) + 1
+        next_column = max(required_columns) + 1
 
-        # Проверяем, существует ли эта колонка.
         if next_column > worksheet.max_column:
             return None
 
-        # Проверяем, есть ли в ней реальные данные.
-        for row_number in range(
-            2,
-            worksheet.max_row + 1,
-        ):
+        for row_number in range(2, worksheet.max_row + 1):
             value = worksheet.cell(
                 row=row_number,
                 column=next_column,
@@ -122,10 +72,6 @@ class ExcelReader:
                 return next_column
 
         return None
-
-    # =========================================================
-    # LOAD
-    # =========================================================
 
     def load(self) -> list[ExcelRow]:
         if not self.path.exists():
@@ -141,26 +87,16 @@ class ExcelReader:
         try:
             worksheet = workbook.active
 
-            # -------------------------------------------------
-            # Headers
-            # -------------------------------------------------
-
             headers: dict[str, int] = {}
 
             for index, cell in enumerate(
                 worksheet[1],
                 start=1,
             ):
-                header = self._normalize_header(
-                    cell.value
-                )
+                header = self._normalize_header(cell.value)
 
                 if header:
                     headers[header] = index
-
-            # -------------------------------------------------
-            # Required columns
-            # -------------------------------------------------
 
             missing = [
                 column
@@ -174,27 +110,28 @@ class ExcelReader:
                     f"обязательные колонки: {missing}"
                 )
 
-            # -------------------------------------------------
-            # Result column
-            # -------------------------------------------------
-
             result_column = self._find_result_column(
                 worksheet,
                 headers,
             )
 
-            rows: list[ExcelRow] = []
+            status_column = (
+                max(headers[column] for column in self.REQUIRED_COLUMNS)
+                + 1
+            )
 
-            # -------------------------------------------------
-            # Read rows
-            # -------------------------------------------------
+            rows: list[ExcelRow] = []
 
             for row_number in range(
                 2,
                 worksheet.max_row + 1,
             ):
-                result = ""
+                status = worksheet.cell(
+                    row=row_number,
+                    column=status_column,
+                ).value if status_column <= worksheet.max_column else ""
 
+                result = ""
                 if result_column is not None:
                     result = worksheet.cell(
                         row=row_number,
@@ -224,6 +161,7 @@ class ExcelReader:
                             row=row_number,
                             column=headers["Номер"],
                         ).value,
+                        status=status,
                         result=result,
                     )
                 )

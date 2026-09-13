@@ -4,9 +4,8 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from app.excel.filter import ResultFilter
+from app.excel.filter import ColumnFilter, ResultFilter
 from app.excel.reader import ExcelReader, ExcelRow
-from app.excel.wps_sync import WPSSync
 from app.settings import Settings
 
 
@@ -21,10 +20,10 @@ class MainWindow:
         self.root.minsize(1150, 700)
 
         self.settings = Settings()
-        self.wps = WPSSync()
-
         self.reader: ExcelReader | None = None
         self.result_filter: ResultFilter | None = None
+        self.status_filter: set[str] | None = None
+        self.column_filters: dict[str, set[str] | None] = {}
 
         # Все строки из Excel.
         self.all_rows: list[ExcelRow] = []
@@ -40,6 +39,14 @@ class MainWindow:
         self.search_text = ""
 
         self._build_ui()
+
+        # Keep the visible ZIK table synchronized with the active
+        # Dialer item. Controller callbacks arrive from worker threads,
+        # so the UI also polls controller state from the Tk main thread.
+        self._controller_poll_job = self.root.after(
+            100,
+            self._poll_controller_status,
+        )
 
         if self.controller is not None:
             self.controller.set_status_callback(
@@ -231,8 +238,8 @@ class MainWindow:
 
         self.result_filter_button = ttk.Button(
             search_frame,
-            text="Результат ▾",
-            command=self.open_result_filter,
+            text="Фильтры",
+            command=self.open_all_filters,
         )
 
         self.result_filter_button.pack(
@@ -315,6 +322,7 @@ class MainWindow:
             "name",
             "payment",
             "phone",
+            "status",
             "result",
         )
 
@@ -356,11 +364,18 @@ class MainWindow:
             text="Номер",
         )
 
-        # Только Result имеет фильтр.
+        # Колонка F из Excel.
+        self.table.heading(
+            "status",
+            text="Статус ▾",
+            command=lambda: self.open_column_filter("status", "Статус"),
+        )
+
+        # Колонка G из Excel.
         self.table.heading(
             "result",
             text="Результат ▾",
-            command=self.open_result_filter,
+            command=lambda: self.open_column_filter("result", "Результат"),
         )
 
         # Ширина колонок.
@@ -399,6 +414,12 @@ class MainWindow:
             "phone",
             width=185,
             minwidth=140,
+        )
+
+        self.table.column(
+            "status",
+            width=135,
+            minwidth=100,
         )
 
         self.table.column(
@@ -530,7 +551,7 @@ class MainWindow:
 
         self.attempt_label = ttk.Label(
             current_frame,
-            text="Попытка: — / 3",
+            text="Попытка: — / 2",
         )
 
         self.attempt_label.pack(
@@ -639,19 +660,6 @@ class MainWindow:
             padx=5,
         )
 
-        self.wps_var = tk.BooleanVar(
-            value=self.settings.wps_sync
-        )
-
-        ttk.Checkbutton(
-            control,
-            text="Синхронизация WPS",
-            variable=self.wps_var,
-            command=self.toggle_wps,
-        ).pack(
-            side="right",
-        )
-
         # --------------------------------------------------------
         # LOG
         # --------------------------------------------------------
@@ -742,6 +750,8 @@ class MainWindow:
             self.result_filter = ResultFilter(
                 self.all_rows
             )
+            self.status_filter = None
+            self.column_filters.clear()
 
             self.file_label.config(
                 text=str(path)
@@ -796,6 +806,8 @@ class MainWindow:
             self.result_filter = ResultFilter(
                 self.all_rows
             )
+            self.status_filter = None
+            self.column_filters.clear()
 
             self.file_label.config(
                 text=str(path)
@@ -856,6 +868,7 @@ class MainWindow:
                     row.name,
                     row.payment_type,
                     row.phone,
+                    row.status,
                     row.result,
                 ),
             )
@@ -983,12 +996,6 @@ class MainWindow:
 
         self.settings.save()
 
-        # WPS.
-        if self.wps_var.get():
-            self.wps.select_row(
-                row.excel_row
-            )
-
     def _on_table_select(
         self,
         _event=None,
@@ -1023,286 +1030,371 @@ class MainWindow:
         self.select_current()
 
     # ============================================================
-    # RESULT FILTER
+    # COLUMN FILTERS
     # ============================================================
 
-    def open_result_filter(self) -> None:
-        if self.result_filter is None:
+    # Только полезные фильтры по значениям.
+    # «Строка», «Дата» и «Номер» не являются checkbox-фильтрами:
+    # строка используется для навигации, дата и номер обычно уникальны.
+    _FILTER_COLUMNS = (
+        ("status", "Статус"),
+        ("result", "Результат"),
+    )
+
+    @staticmethod
+    def _column_label(column: str) -> str:
+        return dict(MainWindow._FILTER_COLUMNS).get(column, column)
+
+    @staticmethod
+    def _column_value(column: str, row: ExcelRow) -> str:
+        if column == "row":
+            return str(row.excel_row)
+        if column == "date":
+            return ColumnFilter.normalize(row.date)
+        if column == "product":
+            return ColumnFilter.normalize(row.product)
+        if column == "name":
+            return ColumnFilter.normalize(row.name)
+        if column == "payment":
+            return ColumnFilter.normalize(row.payment_type)
+        if column == "phone":
+            return ColumnFilter.normalize(row.phone)
+        if column == "status":
+            return ColumnFilter.normalize(row.status)
+        if column == "result":
+            return ResultFilter.normalize(row.result)
+        return ""
+
+    def _get_column_values(self, column: str) -> list[str]:
+        values = {
+            ColumnFilter.display_value(
+                self._column_value(column, row)
+            )
+            for row in self.all_rows
+        }
+
+        return sorted(
+            values,
+            key=lambda value: (
+                value == ColumnFilter.EMPTY_LABEL,
+                value.casefold(),
+            ),
+        )
+
+    def _get_active_filter(self, column: str) -> set[str] | None:
+        selected = self.column_filters.get(column)
+
+        if column == "result" and self.result_filter is not None:
+            selected = self.result_filter.selected
+
+        return None if selected is None else set(selected)
+
+    def open_all_filters(self) -> None:
+        # Основная кнопка «Фильтры» открывает фильтр Статус.
+        self.open_column_filter("status", "Статус")
+
+    def open_column_filter(
+        self,
+        column: str,
+        label: str | None = None,
+        parent=None,
+    ) -> None:
+        if not self.all_rows:
             messagebox.showinfo(
-                "Фильтр",
+                "Фильтры",
                 "Сначала выберите Excel-файл.",
             )
             return
 
-        window = tk.Toplevel(
-            self.root
-        )
-
-        window.title(
-            "Фильтр — Результат"
-        )
-
-        window.resizable(
-            False,
-            False,
-        )
-
-        window.transient(
-            self.root
-        )
-
+        window = tk.Toplevel(self.root)
+        window.title("Фильтры")
+        window.geometry("470x650")
+        window.minsize(440, 560)
+        window.resizable(True, True)
+        window.transient(parent or self.root)
         window.grab_set()
 
-        self.root.update_idletasks()
-
-        # Открываем окно рядом с верхней частью интерфейса.
-        x = (
-            self.root.winfo_rootx()
-            + 300
-        )
-
-        y = (
-            self.root.winfo_rooty()
-            + 160
-        )
-
-        window.geometry(
-            f"340x450+{x}+{y}"
-        )
-
-        container = ttk.Frame(
-            window,
-            padding=12,
-        )
-
-        container.pack(
-            fill="both",
-            expand=True,
-        )
+        container = ttk.Frame(window, padding=12)
+        container.pack(fill="both", expand=True)
 
         ttk.Label(
             container,
-            text="Результат",
+            text="Фильтр по колонке",
             font=("Segoe UI", 12, "bold"),
-        ).pack(
-            anchor="w",
-            pady=(0, 5),
+        ).pack(anchor="w", pady=(0, 8))
+
+        labels = [name for _, name in self._FILTER_COLUMNS]
+        column_var = tk.StringVar(
+            value=label or self._column_label(column)
         )
+
+        column_combo = ttk.Combobox(
+            container,
+            textvariable=column_var,
+            values=labels,
+            state="readonly",
+        )
+        column_combo.pack(fill="x", pady=(0, 8))
+
+        search_var = tk.StringVar()
+
+        search_frame = ttk.Frame(container)
+        search_frame.pack(fill="x", pady=(0, 8))
 
         ttk.Label(
-            container,
-            text=(
-                "Выберите значения, "
-                "которые нужно показывать:"
-            ),
-        ).pack(
-            anchor="w",
-            pady=(0, 10),
+            search_frame,
+            text="Поиск:",
+        ).pack(side="left", padx=(0, 8))
+
+        search_entry = ttk.Entry(
+            search_frame,
+            textvariable=search_var,
         )
+        search_entry.pack(side="left", fill="x", expand=True)
 
-        values = (
-            self.result_filter.get_values()
-        )
-
-        variables: dict[
-            str,
-            tk.BooleanVar,
-        ] = {}
-
-        current = (
-            self.result_filter.selected
-        )
-
-        all_selected = (
-            current is None
-            or set(values) == current
-        )
-
-        select_all_var = tk.BooleanVar(
-            value=all_selected
-        )
-
-        ttk.Checkbutton(
-            container,
-            text="Выбрать всё",
-            variable=select_all_var,
-            command=lambda: (
-                self._toggle_all_result_values(
-                    variables,
-                    select_all_var.get(),
-                )
-            ),
-        ).pack(
-            anchor="w",
-            pady=(0, 5),
-        )
-
-        ttk.Separator(
-            container,
-            orient="horizontal",
-        ).pack(
-            fill="x",
-            pady=5,
-        )
-
-        # --------------------------------------------------------
-        # VALUES
-        # --------------------------------------------------------
-
-        list_frame = ttk.Frame(
-            container
-        )
-
-        list_frame.pack(
-            fill="both",
-            expand=True,
-        )
+        list_frame = ttk.Frame(container)
+        list_frame.pack(fill="both", expand=True)
 
         canvas = tk.Canvas(
             list_frame,
-            width=290,
-            height=245,
             highlightthickness=0,
         )
-
         scrollbar = ttk.Scrollbar(
             list_frame,
             orient="vertical",
             command=canvas.yview,
         )
+        values_frame = ttk.Frame(canvas)
 
-        values_frame = ttk.Frame(
-            canvas
-        )
-
-        values_frame.bind(
-            "<Configure>",
-            lambda event: canvas.configure(
-                scrollregion=canvas.bbox(
-                    "all"
-                )
-            ),
-        )
-
-        canvas.create_window(
+        canvas_window = canvas.create_window(
             (0, 0),
             window=values_frame,
             anchor="nw",
         )
 
+        values_frame.bind(
+            "<Configure>",
+            lambda _event: canvas.configure(
+                scrollregion=canvas.bbox("all")
+            ),
+        )
+
+        canvas.bind(
+            "<Configure>",
+            lambda event: canvas.itemconfigure(
+                canvas_window,
+                width=event.width,
+            ),
+        )
+
         canvas.configure(
-            yscrollcommand=scrollbar.set
+            yscrollcommand=scrollbar.set,
         )
 
-        canvas.pack(
-            side="left",
-            fill="both",
-            expand=True,
-        )
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
 
-        scrollbar.pack(
-            side="right",
-            fill="y",
-        )
+        current_column = {"key": column}
+        variables: dict[str, tk.BooleanVar] = {}
+        rebuilding = {"value": False}
 
-        for value in values:
-            selected = (
-                current is None
-                or value in current
+        select_all_var = tk.BooleanVar(value=True)
+
+        def update_select_all() -> None:
+            if not variables:
+                select_all_var.set(False)
+                return
+            select_all_var.set(
+                all(variable.get() for variable in variables.values())
             )
 
-            variable = tk.BooleanVar(
-                value=selected
-            )
+        def rebuild_values() -> None:
+            rebuilding["value"] = True
 
-            variables[value] = variable
+            for child in values_frame.winfo_children():
+                child.destroy()
 
-            ttk.Checkbutton(
-                values_frame,
-                text=value,
-                variable=variable,
-            ).pack(
-                anchor="w",
-                pady=2,
-            )
+            variables.clear()
 
-        # --------------------------------------------------------
-        # BUTTONS
-        # --------------------------------------------------------
+            active_column = current_column["key"]
+            selected = self._get_active_filter(active_column)
+            query = search_var.get().strip().casefold()
 
-        buttons = ttk.Frame(
-            container
+            for display_value in self._get_column_values(active_column):
+                if query and query not in display_value.casefold():
+                    continue
+
+                stored_value = ColumnFilter.to_stored(display_value)
+                checked = (
+                    selected is None
+                    or stored_value in selected
+                )
+
+                variable = tk.BooleanVar(value=checked)
+                variables[stored_value] = variable
+
+                ttk.Checkbutton(
+                    values_frame,
+                    text=display_value,
+                    variable=variable,
+                    command=update_select_all,
+                ).pack(
+                    anchor="w",
+                    fill="x",
+                    pady=1,
+                )
+
+            update_select_all()
+            rebuilding["value"] = False
+
+        def change_column(_event=None) -> None:
+            selected_label = column_var.get()
+
+            for key, name in self._FILTER_COLUMNS:
+                if name == selected_label:
+                    current_column["key"] = key
+                    break
+
+            search_var.set("")
+            rebuild_values()
+
+        column_combo.bind(
+            "<<ComboboxSelected>>",
+            change_column,
         )
 
-        buttons.pack(
-            fill="x",
-            pady=(10, 0),
+        def toggle_all() -> None:
+            value = select_all_var.get()
+            for variable in variables.values():
+                variable.set(value)
+
+        ttk.Checkbutton(
+            container,
+            text="Выбрать всё",
+            variable=select_all_var,
+            command=toggle_all,
+        ).pack(anchor="w", pady=(0, 6))
+
+        search_var.trace_add(
+            "write",
+            lambda *_args: rebuild_values()
+            if not rebuilding["value"]
+            else None,
         )
 
-        def reset() -> None:
+        quick_buttons = ttk.Frame(container)
+        quick_buttons.pack(fill="x", pady=(6, 8))
+
+        def select_visible() -> None:
+            select_all_var.set(True)
             for variable in variables.values():
                 variable.set(True)
 
-            select_all_var.set(True)
+        def deselect_visible() -> None:
+            select_all_var.set(False)
+            for variable in variables.values():
+                variable.set(False)
+
+        ttk.Button(
+            quick_buttons,
+            text="Все",
+            command=select_visible,
+        ).pack(side="left")
+
+        ttk.Button(
+            quick_buttons,
+            text="Ничего",
+            command=deselect_visible,
+        ).pack(side="left", padx=5)
+
+        ttk.Button(
+            quick_buttons,
+            text="Сбросить все",
+            command=self.clear_all_filters,
+        ).pack(side="right")
+
+        buttons = ttk.Frame(container)
+        buttons.pack(fill="x", pady=(4, 0))
 
         def apply() -> None:
+            active_column = current_column["key"]
+
+            all_values = {
+                ColumnFilter.to_stored(value)
+                for value in self._get_column_values(active_column)
+            }
+
             selected_values = {
                 value
-                for value, variable
-                in variables.items()
+                for value, variable in variables.items()
                 if variable.get()
             }
 
-            if not selected_values:
-                self.result_filter.set_selected(
-                    set()
-                )
+            # Если поле поиска использовалось, его скрытые значения
+            # должны остаться выбранными. Иначе поиск значений мог бы
+            # случайно удалить уже установленный фильтр.
+            query = search_var.get().strip().casefold()
 
-            elif (
-                selected_values
-                == set(values)
-            ):
-                self.result_filter.clear()
+            if query:
+                previous = self._get_active_filter(active_column)
 
+                if previous is None:
+                    hidden = {
+                        value
+                        for value in all_values
+                        if query not in ColumnFilter.display_value(value).casefold()
+                    }
+                    selected_values |= hidden
+                else:
+                    selected_values |= (
+                        previous - set(variables)
+                    )
+
+            if active_column == "result":
+                selected_values = {
+                    ResultFilter.normalize(value)
+                    for value in selected_values
+                }
+                all_values = {
+                    ResultFilter.normalize(value)
+                    for value in all_values
+                }
+
+            if not selected_values or selected_values == all_values:
+                self.column_filters.pop(active_column, None)
+
+                if (
+                    active_column == "result"
+                    and self.result_filter is not None
+                ):
+                    self.result_filter.clear()
             else:
-                self.result_filter.set_selected(
-                    selected_values
-                )
+                self.column_filters[active_column] = selected_values
 
-            self.apply_filters(
-                preserve_current=True
-            )
+                if (
+                    active_column == "result"
+                    and self.result_filter is not None
+                ):
+                    self.result_filter.set_selected(selected_values)
 
+            self.apply_filters(preserve_current=True)
             window.destroy()
 
         ttk.Button(
             buttons,
-            text="Сбросить",
-            command=reset,
-        ).pack(
-            side="left",
-        )
+            text="Отмена",
+            command=window.destroy,
+        ).pack(side="left")
 
         ttk.Button(
             buttons,
             text="Применить",
             command=apply,
-        ).pack(
-            side="right",
-        )
+        ).pack(side="right")
 
-    def _toggle_all_result_values(
-        self,
-        variables: dict[
-            str,
-            tk.BooleanVar,
-        ],
-        value: bool,
-    ) -> None:
-        for variable in variables.values():
-            variable.set(value)
+        rebuild_values()
+        search_entry.focus_set()
 
-    # ============================================================
     # SEARCH
     # ============================================================
 
@@ -1342,6 +1434,7 @@ class MainWindow:
             row.name,
             row.payment_type,
             row.phone,
+            row.status,
             row.result,
         )
 
@@ -1359,63 +1452,45 @@ class MainWindow:
         self,
         preserve_current: bool = True,
     ) -> None:
-        if self.result_filter is None:
-            return
-
         old_excel_row = None
 
         if (
             preserve_current
-            and 0 <= self.current_index
-            < len(self.rows)
+            and 0 <= self.current_index < len(self.rows)
         ):
-            old_excel_row = (
-                self.rows[
-                    self.current_index
-                ].excel_row
-            )
+            old_excel_row = self.rows[self.current_index].excel_row
 
-        # Result filter.
-        rows = self.result_filter.apply(
-            self.all_rows
-        )
+        rows = list(self.all_rows)
 
-        # Search.
+        for column, selected in self.column_filters.items():
+            if selected is not None:
+                rows = [
+                    row
+                    for row in rows
+                    if self._column_value(column, row) in selected
+                ]
+
         if self.search_text:
             rows = [
-                row
-                for row in rows
+                row for row in rows
                 if self._matches_search(row)
             ]
 
         self.rows = rows
 
-        # Ничего не найдено.
         if not self.rows:
             self.current_index = -1
-
             self.populate_table()
             self.select_current()
             self.update_filter_status()
-
-            self.write_log(
-                "Фильтр: подходящих клиентов нет."
-            )
-
+            self.write_log("Фильтр: подходящих клиентов нет.")
             return
 
-        # По умолчанию первая строка.
         self.current_index = 0
 
-        # Если возможно — сохраняем текущую строку.
         if old_excel_row is not None:
-            for index, row in enumerate(
-                self.rows
-            ):
-                if (
-                    row.excel_row
-                    == old_excel_row
-                ):
+            for index, row in enumerate(self.rows):
+                if row.excel_row == old_excel_row:
                     self.current_index = index
                     break
 
@@ -1423,15 +1498,12 @@ class MainWindow:
         self.select_current()
         self.update_filter_status()
 
-        self.write_log(
-            f"Фильтр применён: "
-            f"{len(self.rows)} из "
-            f"{len(self.all_rows)}"
-        )
-
     def clear_all_filters(self) -> None:
         if self.result_filter is not None:
             self.result_filter.clear()
+
+        self.status_filter = None
+        self.column_filters.clear()
 
         self.search_var.set("")
         self.search_text = ""
@@ -1447,57 +1519,37 @@ class MainWindow:
         self.update_filter_status()
 
         self.write_log(
-            "Фильтр результата и поиск сброшены."
+            "Все фильтры и поиск сброшены."
         )
 
     def update_filter_status(self) -> None:
         if not self.all_rows:
-            self.filter_status.config(
-                text="Показано: 0"
-            )
+            self.filter_status.config(text="Показано: 0")
             return
 
-        active = []
-
-        if (
-            self.result_filter is not None
-            and self.result_filter.is_active
-        ):
-            active.append(
-                "Результат"
-            )
+        active = [
+            self._column_label(column)
+            for column, selected in self.column_filters.items()
+            if selected is not None
+        ]
 
         if self.search_text:
-            active.append(
-                "Поиск"
-            )
+            active.append("Поиск")
 
         if active:
             self.filter_status.config(
                 text=(
-                    f"{len(self.rows)} / "
-                    f"{len(self.all_rows)} | "
+                    f"{len(self.rows)} / {len(self.all_rows)} | "
                     f"{', '.join(active)}"
                 )
             )
-
-            self.result_filter_button.config(
-                text="Результат ●"
-            )
-
+            self.result_filter_button.config(text="Фильтры ●")
         else:
             self.filter_status.config(
-                text=(
-                    f"{len(self.rows)} / "
-                    f"{len(self.all_rows)}"
-                )
+                text=f"{len(self.rows)} / {len(self.all_rows)}"
             )
+            self.result_filter_button.config(text="Фильтры")
 
-            self.result_filter_button.config(
-                text="Результат ▾"
-            )
-
-    # ============================================================
     # NAVIGATION
     # ============================================================
 
@@ -1590,11 +1642,10 @@ class MainWindow:
             self.controller.clear_result_filter()
             return
 
-        if self.result_filter.is_active:
-            selected = self.result_filter.selected
-            self.controller.set_result_filter(
-                None if selected is None else set(selected)
-            )
+        selected = self.column_filters.get("result")
+
+        if selected is not None:
+            self.controller.set_result_filter(set(selected))
         else:
             self.controller.clear_result_filter()
 
@@ -1771,6 +1822,67 @@ class MainWindow:
                 "Следующий номер будет набран после RESUME."
             )
 
+    def _poll_controller_status(self) -> None:
+        """
+        Refresh the active call information from the Tk main thread.
+
+        This is intentionally lightweight and does not write to the log.
+        It prevents the visible table selection from waiting for a later
+        Tkinter event when Dialer changes the current queue item.
+        """
+        try:
+            if self.controller is not None:
+                running = self.controller.is_running
+                paused = self.controller.is_paused
+
+                if running or paused:
+                    current = self.controller.get_current()
+                    excel_row = current.get("excel_row")
+                    phone = current.get("phone") or ""
+                    state = current.get("state") or "IDLE"
+                    attempt = current.get("attempt", 0)
+                    result = current.get("result") or ""
+
+                    if excel_row is not None:
+                        self._sync_ui_to_excel_row(
+                            int(excel_row)
+                        )
+
+                        self.current_row_label.config(
+                            text=f"Строка Excel: {excel_row}"
+                        )
+
+                    if phone:
+                        self.current_phone.config(
+                            text=phone
+                        )
+
+                    self.attempt_label.config(
+                        text=f"Попытка: {attempt} / 2"
+                    )
+
+                    if result:
+                        self.current_result.config(
+                            text=f"Результат: {result}"
+                        )
+
+                    self.call_state.config(
+                        text="PAUSED" if paused else state
+                    )
+
+        except (tk.TclError, RuntimeError):
+            return
+        except Exception:
+            return
+
+        try:
+            self._controller_poll_job = self.root.after(
+                100,
+                self._poll_controller_status,
+            )
+        except tk.TclError:
+            pass
+
     def _on_controller_status(
         self,
         status: dict,
@@ -1788,6 +1900,21 @@ class MainWindow:
             )
         except tk.TclError:
             pass
+
+    def _sync_ui_to_excel_row(
+        self,
+        excel_row: int,
+    ) -> None:
+        """
+        Synchronize the visible UI selection with the Excel row
+        reported by Controller.
+        """
+        for index, row in enumerate(self.rows):
+            if row.excel_row == excel_row:
+                if index != self.current_index:
+                    self.current_index = index
+                    self.select_current()
+                return
 
     def _apply_controller_status(
         self,
@@ -1823,7 +1950,7 @@ class MainWindow:
             )
 
         self.attempt_label.config(
-            text=f"Попытка: {attempt} / 3"
+            text=f"Попытка: {attempt} / 2"
         )
 
         if phone:
@@ -1832,6 +1959,10 @@ class MainWindow:
             )
 
         if excel_row is not None:
+            self._sync_ui_to_excel_row(
+                int(excel_row)
+            )
+
             self.current_row_label.config(
                 text=f"Строка Excel: {excel_row}"
             )
@@ -1868,7 +1999,7 @@ class MainWindow:
                 else ""
             )
             + (
-                f" | attempt={attempt}/3"
+                f" | attempt={attempt}/2"
                 if attempt
                 else ""
             )
@@ -1881,30 +2012,6 @@ class MainWindow:
         )
 
     # ============================================================
-    # ============================================================
-    # WPS
-    # ============================================================
-
-    def toggle_wps(self) -> None:
-        self.wps.enabled = (
-            self.wps_var.get()
-        )
-
-        self.settings.wps_sync = (
-            self.wps_var.get()
-        )
-
-        self.settings.save()
-
-        self.write_log(
-            "WPS sync: "
-            + (
-                "ON"
-                if self.wps.enabled
-                else "OFF"
-            )
-        )
-
     # ============================================================
     # LOG
     # ============================================================
